@@ -28,304 +28,234 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-//#include <libgen.h>
-//#include <fstream>
 
-#include "ros/ros.h"
-#include "ros/console.h"
-#include "nav_msgs/MapMetaData.h"
-#include "nav_msgs/OccupancyGrid.h"
+#include <rclcpp/rclcpp.hpp>
+#include <nav_msgs/msg/map_meta_data.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <nav_msgs/srv/get_map.hpp>
 
-#include <boost/thread.hpp>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2/utils.h>
 
-#include <tf/transform_listener.h>
+#include <hector_map_tools/HectorMapTools.h>
 
-#include "nav_msgs/GetMap.h"
+#include <hector_nav_msgs/srv/get_distance_to_obstacle.hpp>
+#include <hector_nav_msgs/srv/get_search_position.hpp>
+
+#include <memory>
+#include <chrono>
 
 #include "hector_marker_drawing/HectorDrawings.h"
-#include "hector_map_tools/HectorMapTools.h"
-
-#include "hector_nav_msgs/GetDistanceToObstacle.h"
-#include "hector_nav_msgs/GetSearchPosition.h"
 
 
 class OccupancyGridContainer
 {
 public:
-  OccupancyGridContainer(std::string sub_topic, std::string prefix, ros::NodeHandle& nh, HectorDrawings* drawing_provider, tf::TransformListener* tf_)
+  OccupancyGridContainer(std::string /* sub_topic */, std::string /* prefix */, rclcpp::Node::SharedPtr node, HectorDrawings* drawing_provider, std::shared_ptr<tf2_ros::Buffer> tf_buffer)
     : drawing_provider_(drawing_provider)
-    , tf_(tf_)
+    , tf_buffer_(tf_buffer)
+    , node_(node)
   {
-
     std::string service_name = "map";
-    map_service_ = nh.advertiseService(service_name, &OccupancyGridContainer::mapServiceCallback, this);
+    map_service_ = node_->create_service<nav_msgs::srv::GetMap>(service_name, 
+      std::bind(&OccupancyGridContainer::mapServiceCallback, this, std::placeholders::_1, std::placeholders::_2));
 
-    ros::NodeHandle pnh("~");
     std::string lookup_service_name = "get_distance_to_obstacle";
-    dist_lookup_service_ = pnh.advertiseService(lookup_service_name, &OccupancyGridContainer::lookupServiceCallback, this);
+    dist_lookup_service_ = node_->create_service<hector_nav_msgs::srv::GetDistanceToObstacle>(lookup_service_name, 
+      std::bind(&OccupancyGridContainer::lookupServiceCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     std::string get_search_pos_service_name = "get_search_position";
-    get_search_pos_service_ = pnh.advertiseService(get_search_pos_service_name, &OccupancyGridContainer::getSearchPosServiceCallback, this);
+    get_search_pos_service_ = node_->create_service<hector_nav_msgs::srv::GetSearchPosition>(get_search_pos_service_name, 
+      std::bind(&OccupancyGridContainer::getSearchPosServiceCallback, this, std::placeholders::_1, std::placeholders::_2));
 
-    map_sub_ = nh.subscribe("map", 1, &OccupancyGridContainer::mapCallback, this);
+    map_sub_ = node_->create_subscription<nav_msgs::msg::OccupancyGrid>("map", 1, 
+      std::bind(&OccupancyGridContainer::mapCallback, this, std::placeholders::_1));
   }
 
   ~OccupancyGridContainer()
   {}
 
-  bool mapServiceCallback(nav_msgs::GetMap::Request  &req,
-                          nav_msgs::GetMap::Response &res )
+  void mapServiceCallback(const std::shared_ptr<nav_msgs::srv::GetMap::Request> /* req */,
+                          std::shared_ptr<nav_msgs::srv::GetMap::Response> res)
   {
-    ROS_INFO("hector_map_server map service called");
+    RCLCPP_INFO(node_->get_logger(), "hector_map_server map service called");
 
     if (!map_ptr_){
-      ROS_INFO("map_server has no map yet, no map service available");
-      return false;
+      RCLCPP_INFO(node_->get_logger(), "map_server has no map yet, no map service available");
+      return;
     }
 
-    res.map = *map_ptr_;
-
-    return true;
+    res->map = *map_ptr_;
   }
 
-  bool lookupServiceCallback(hector_nav_msgs::GetDistanceToObstacle::Request  &req,
-                          hector_nav_msgs::GetDistanceToObstacle::Response &res )
+  void lookupServiceCallback(const std::shared_ptr<hector_nav_msgs::srv::GetDistanceToObstacle::Request> req,
+                             std::shared_ptr<hector_nav_msgs::srv::GetDistanceToObstacle::Response> res)
   {
-    //ROS_INFO("hector_map_server lookup service called");
-
-
     if (!map_ptr_){
-      ROS_INFO("map_server has no map yet, no lookup service available");
-      return false;
+      RCLCPP_INFO(node_->get_logger(), "map_server has no map yet, no lookup service available");
+      return;
     }
 
-    tf::StampedTransform stamped_pose;
-
-
-
     try{
-      tf_->waitForTransform(map_ptr_->header.frame_id,req.point.header.frame_id, req.point.header.stamp, ros::Duration(1.0));
-      tf_->lookupTransform(map_ptr_->header.frame_id, req.point.header.frame_id, req.point.header.stamp, stamped_pose);
+      geometry_msgs::msg::TransformStamped transform = tf_buffer_->lookupTransform(
+        map_ptr_->header.frame_id, req->point.header.frame_id, req->point.header.stamp, rclcpp::Duration::from_seconds(1.0));
 
-      tf::Point v2_tf;
-      tf::pointMsgToTF(req.point.point,v2_tf);
+      // Transform point to map frame
+      geometry_msgs::msg::PointStamped point_transformed;
+      point_transformed.header = req->point.header;
+      point_transformed.point = req->point.point;
+      point_transformed = tf_buffer_->transform(point_transformed, map_ptr_->header.frame_id);
 
-      tf::Vector3 v1 = stamped_pose * tf::Vector3(0.0, 0.0, 0.0);
-      tf::Vector3 v2 = stamped_pose * v2_tf;
-      tf::Vector3 diff = v2 - v1;
-      v2 = v1 + diff / tf::Vector3(diff.x(), diff.y(), 0.0).length() * 5.0f;
-
-      Eigen::Vector2f start(v1.x(),v1.y());
-      Eigen::Vector2f end(v2.x(),v2.y());
+      // Get origin from transform
+      Eigen::Vector2f start(transform.transform.translation.x, transform.transform.translation.y);
+      Eigen::Vector2f end(point_transformed.point.x, point_transformed.point.y);
 
       Eigen::Vector2f hit_world;
-      //float dist = dist_meas_.getDist(start,end, &hit_world);
-      float dist = dist_meas_.getDist(start,end,&hit_world);
+      float dist = dist_meas_.getDist(start, end, &hit_world);
 
-      if (dist >=0.0f){
-        tf::Vector3 diff (v2-v1);
-
-        float angle = diff.angle(tf::Vector3(diff.x(),diff.y(),0.0f));
-
-        res.distance = dist/cos(angle);
-
-      }else{
-        res.distance = -1.0f;
+      if (dist >= 0.0f){
+        Eigen::Vector2f diff = end - start;
+        float diff_length = diff.norm();
+        if (diff_length > 0.0f) {
+          float angle = std::acos(std::max(-1.0f, std::min(1.0f, diff.x() / diff_length)));
+          res->distance = dist / std::cos(angle);
+        } else {
+          res->distance = dist;
+        }
+      } else {
+        res->distance = -1.0f;
       }
 
-      //debug drawing
-      if (false){
-
+      // Debug drawing
+      if (drawing_provider_){
         float cube_scale = map_ptr_->info.resolution;
         drawing_provider_->setColor(1.0, 0.0, 0.0);
         drawing_provider_->setScale(static_cast<double>(cube_scale));
-
         drawing_provider_->drawPoint(start);
-
         drawing_provider_->setColor(0.0, 1.0, 0.0);
         drawing_provider_->drawPoint(end);
-
         if (dist >= 0.0f){
           drawing_provider_->setColor(0.0, 0.0, 1.0);
           drawing_provider_->drawPoint(hit_world);
         }
-
         drawing_provider_->sendAndResetData();
       }
+      return;
 
-      return true;
-
-    }
-    catch(tf::TransformException e)
+    } catch(tf2::TransformException &e)
     {
-      ROS_ERROR("Transform failed in lookup distance service call: %s",e.what());
+      RCLCPP_ERROR(node_->get_logger(), "Transform failed in lookup distance service call: %s", e.what());
     }
 
-    return false;
+    res->distance = -1.0f;
   }
 
-  bool getSearchPosServiceCallback(hector_nav_msgs::GetSearchPosition::Request  &req,
-                                   hector_nav_msgs::GetSearchPosition::Response &res )
+  void getSearchPosServiceCallback(const std::shared_ptr<hector_nav_msgs::srv::GetSearchPosition::Request> req,
+                                   std::shared_ptr<hector_nav_msgs::srv::GetSearchPosition::Response> res)
   {
     if (!map_ptr_){
-      ROS_INFO("map_server has no map yet, no get best search pos service available");
-      return false;
+      RCLCPP_INFO(node_->get_logger(), "map_server has no map yet, no get best search pos service available");
+      return;
     }
 
     try{
+      geometry_msgs::msg::PoseStamped transformed_pose = tf_buffer_->transform(req->ooi_pose, map_ptr_->header.frame_id);
 
-      tf::Stamped<tf::Pose> ooi_pose, transformed_pose, search_position;
-      tf::poseStampedMsgToTF(req.ooi_pose, ooi_pose);
+      // Calculate search position: move backwards by req->distance along the x-axis of the pose
+      tf2::Transform pose_tf;
+      tf2::fromMsg(transformed_pose.pose, pose_tf);
 
-      tf_->waitForTransform(map_ptr_->header.frame_id, req.ooi_pose.header.frame_id, req.ooi_pose.header.stamp, ros::Duration(1.0));
-      tf_->transformPose(map_ptr_->header.frame_id, ooi_pose, transformed_pose);
+      tf2::Vector3 direction(-req->distance, 0.0, 0.0);
+      tf2::Vector3 search_origin = pose_tf.getOrigin() + pose_tf.getBasis() * direction;
 
-      tf::Vector3 direction(-req.distance, 0.0, 0.0);
-      search_position = transformed_pose;
-      search_position.setOrigin(transformed_pose.getOrigin() + transformed_pose.getBasis() * direction);
+      pose_tf.setOrigin(search_origin);
+      res->search_pose.header = transformed_pose.header;
+      
+      // Convert Transform to Pose
+      geometry_msgs::msg::Pose search_pose;
+      search_pose.position.x = pose_tf.getOrigin().x();
+      search_pose.position.y = pose_tf.getOrigin().y();
+      search_pose.position.z = pose_tf.getOrigin().z();
+      tf2::Quaternion q = pose_tf.getRotation();
+      search_pose.orientation = tf2::toMsg(q);
+      res->search_pose.pose = search_pose;
 
-      tf::poseStampedTFToMsg(search_position, res.search_pose);
+      return;
 
-      return true;
-
-//      //tf::Point v2_tf;
-//      //tf::pointMsgToTF(req.point.point,v2_tf);
-
-//      tf::Vector3 v1 = stamped_pose * tf::Vector3(0.0, 0.0, 0.0);
-
-//      //warning: 3D!
-//      tf::Vector3 v2 = stamped_pose * tf::Vector3(-1.0, 0.0, 0.0);
-
-//      tf::Vector3 dir = v2-v1;
-
-//      Eigen::Vector2f dir_2d (dir.x(), dir.y());
-
-//      dir_2d.normalize();
-
-//      Eigen::Vector2f searchPos (Eigen::Vector2f(v1.x(),v1.y()) + (dir_2d*0.5f));
-
-//      //copy original pose message but set translation
-//      res.search_pose.pose = ooi_pose.pose;
-
-//      res.search_pose.pose.position.x = searchPos.x();
-//      res.search_pose.pose.position.y = searchPos.y();
-
-      //return true;
-
-
-      //Eigen::Vector2f ooi_pos(v1.x(),v1.y());
-      //Eigen::Vector2f sample_point_pos(v2.x(),v2.y());
-
-
-      //float dist_from_target = dist_meas_.getDist(ooi_pos,sample_point_pos);
-      //float dist_from_sample_point = dist_meas_.getDist(sample_point_pos, ooi_pos);
-
-
-
-/*
-      if (dist >=0.0f){
-        tf::Vector3 diff (v2-v1);
-
-        float angle = diff.angle(tf::Vector3(diff.x(),diff.y(),0.0f));
-
-        res.distance = dist/cos(angle);
-
-
-        //debug drawing
-        if (true){
-
-          float cube_scale = map_ptr_->info.resolution;
-          drawing_provider_->setColor(1.0, 0.0, 0.0);
-          drawing_provider_->setScale(static_cast<double>(cube_scale));
-
-          drawing_provider_->drawPoint(start);
-          drawing_provider_->drawPoint(end);
-
-          if (dist >= 0.0f){
-            drawing_provider_->setColor(0.0, 0.0, 1.0);
-            drawing_provider_->drawPoint(hit_world);
-          }
-
-          drawing_provider_->sendAndResetData();
-        }
-
-      }
-      */
-      //return true;
-
-    }    catch(tf::TransformException e){
-      ROS_ERROR("Transform failed in getSearchPosition service call: %s",e.what());
+    } catch(tf2::TransformException &e){
+      RCLCPP_ERROR(node_->get_logger(), "Transform failed in getSearchPosition service call: %s", e.what());
     }
 
-    return false;
+    res->search_pose = req->ooi_pose; // Return original pose on error
   }
 
-  void mapCallback(const nav_msgs::OccupancyGridConstPtr& map)
+  void mapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr map)
   {
     map_ptr_ = map;
-
     dist_meas_.setMap(map_ptr_);
   }
 
   //Services
-  ros::ServiceServer map_service_;
-  ros::ServiceServer dist_lookup_service_;
-  ros::ServiceServer get_search_pos_service_;
+  rclcpp::Service<nav_msgs::srv::GetMap>::SharedPtr map_service_;
+  rclcpp::Service<hector_nav_msgs::srv::GetDistanceToObstacle>::SharedPtr dist_lookup_service_;
+  rclcpp::Service<hector_nav_msgs::srv::GetSearchPosition>::SharedPtr get_search_pos_service_;
 
   //Subscriber
-  ros::Subscriber map_sub_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
 
   HectorMapTools::DistanceMeasurementProvider dist_meas_;
 
   HectorDrawings* drawing_provider_;
-  tf::TransformListener* tf_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  rclcpp::Node::SharedPtr node_;
 
-  //nav_msgs::MapMetaData meta_data_message_;
-  nav_msgs::GetMap::Response map_resp_;
-
-  nav_msgs::OccupancyGridConstPtr map_ptr_;
+  nav_msgs::msg::OccupancyGrid::SharedPtr map_ptr_;
 };
 
-class HectorMapServer
+class HectorMapServer : public rclcpp::Node
 {
-  public:
+public:
     /** Trivial constructor */
-    HectorMapServer(ros::NodeHandle& private_nh)
+    HectorMapServer()
+    : Node("hector_map_server")
     {
       std::string frame_id;
 
-      hector_drawings_ = new HectorDrawings();
+      hector_drawings_ = new HectorDrawings(shared_from_this());
       hector_drawings_->setNamespace("map_server");
 
-      mapContainer = new OccupancyGridContainer("map", "" ,private_nh, hector_drawings_,&tf_);
+      tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+      tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+      mapContainer = new OccupancyGridContainer("map", "", shared_from_this(), hector_drawings_, tf_buffer_);
     }
 
     ~HectorMapServer()
     {
       delete mapContainer;
-
-
-      delete hector_drawings_;
+      if (hector_drawings_)
+        delete hector_drawings_;
     }
-
 
 public:
     OccupancyGridContainer* mapContainer;
 private:
-
     HectorDrawings* hector_drawings_;
-    tf::TransformListener tf_;
+    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
 };
 
 int main(int argc, char **argv)
 {
-  ros::init(argc, argv, "hector_map_server");
-  ros::NodeHandle nh;
+  rclcpp::init(argc, argv);
 
-  HectorMapServer ms(nh);
+  auto node = std::make_shared<HectorMapServer>();
 
-  ros::spin();
+  rclcpp::spin(node);
+
+  rclcpp::shutdown();
 
   return 0;
 }
-

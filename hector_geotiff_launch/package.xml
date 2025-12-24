@@ -1,5 +1,6 @@
 <?xml version="1.0"?>
-<package format="2">
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>hector_geotiff_launch</name>
   <version>0.5.2</version>
   <description>Contains launch files for the hector_geotiff mapper.</description>
@@ -12,8 +13,13 @@
 
   <author email="kohlbrecher@sim.tu-darmstadt.de">Stefan Kohlbrecher</author>
 
-  <buildtool_depend>catkin</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  
   <exec_depend>hector_geotiff</exec_depend>
   <exec_depend>hector_geotiff_plugins</exec_depend>
   <exec_depend>hector_trajectory_server</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
 </package>

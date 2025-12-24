@@ -27,164 +27,210 @@
 //=================================================================================================
 
 
-#include "ros/ros.h"
-#include "tf/transform_broadcaster.h"
-#include <sensor_msgs/Imu.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <nav_msgs/Odometry.h>
+#include <rclcpp/rclcpp.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <sensor_msgs/msg/imu.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <tf2/utils.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
-std::string p_map_frame_;
-std::string p_base_footprint_frame_;
-std::string p_base_stabilized_frame_;
-std::string p_base_frame_;
-tf::TransformBroadcaster* tfB_;
-tf::StampedTransform transform_;
-
-tf::Quaternion robot_pose_quaternion_;
-tf::Point robot_pose_position_;
-tf::Transform robot_pose_transform_;
-
-tf::Quaternion tmp_;
-tf::Quaternion orientation_quaternion_;
-
-sensor_msgs::ImuConstPtr last_imu_msg_;
-sensor_msgs::Imu fused_imu_msg_;
-nav_msgs::Odometry odom_msg_;
-geometry_msgs::PoseStampedConstPtr last_pose_msg_;
-
-ros::Publisher fused_imu_publisher_;
-ros::Publisher odometry_publisher_;
-
-size_t callback_count_;
-
-#ifndef TF_MATRIX3x3_H
-typedef btScalar tfScalar;
-namespace tf { typedef btMatrix3x3 Matrix3x3; }
-#endif
-
-void imuMsgCallback(const sensor_msgs::Imu::ConstPtr& imu_msg)
+class PoseAndOrientationToImuNode : public rclcpp::Node
 {
-  callback_count_++;
+public:
+  PoseAndOrientationToImuNode()
+  : Node("pose_and_orientation_to_imu_node")
+  {
+    // Declare and get parameters
+    this->declare_parameter<std::string>("map_frame", "map");
+    this->declare_parameter<std::string>("base_footprint_frame", "base_footprint");
+    this->declare_parameter<std::string>("base_stabilized_frame", "base_stabilized");
+    this->declare_parameter<std::string>("base_frame", "base_link");
 
-  tf::quaternionMsgToTF(imu_msg->orientation, tmp_);
+    this->get_parameter("map_frame", p_map_frame_);
+    this->get_parameter("base_footprint_frame", p_base_footprint_frame_);
+    this->get_parameter("base_stabilized_frame", p_base_stabilized_frame_);
+    this->get_parameter("base_frame", p_base_frame_);
 
-  tfScalar imu_yaw, imu_pitch, imu_roll;
-  tf::Matrix3x3(tmp_).getRPY(imu_roll, imu_pitch, imu_yaw);
+    fused_imu_msg_.header.frame_id = p_base_stabilized_frame_;
+    odom_msg_.header.frame_id = "map";
 
-  tf::Transform transform;
-  transform.setIdentity();
-  tf::Quaternion quat;
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-  quat.setRPY(imu_roll, imu_pitch, 0.0);
+    fused_imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("/fused_imu", 1);
+    odometry_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("/state", 1);
 
-  if (true){
-    transform.setRotation(quat);
-    tfB_->sendTransform(tf::StampedTransform(transform, imu_msg->header.stamp, p_base_stabilized_frame_, p_base_frame_));
+    imu_subscriber_ = this->create_subscription<sensor_msgs::msg::Imu>(
+      "/imu", 10, std::bind(&PoseAndOrientationToImuNode::imuMsgCallback, this, std::placeholders::_1));
+    pose_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+      "/pose", 10, std::bind(&PoseAndOrientationToImuNode::poseMsgCallback, this, std::placeholders::_1));
+
+    callback_count_ = 0;
   }
 
-  tfScalar pose_yaw, pose_pitch, pose_roll;
+private:
+  void imuMsgCallback(const sensor_msgs::msg::Imu::SharedPtr imu_msg)
+  {
+    callback_count_++;
 
-  if (last_pose_msg_ != 0){
-    tf::quaternionMsgToTF(last_pose_msg_->pose.orientation, tmp_);
+    tf2::Quaternion tmp;
+    tf2::fromMsg(imu_msg->orientation, tmp);
 
-    tf::Matrix3x3(tmp_).getRPY(pose_roll, pose_pitch, pose_yaw);
-  }else{
-    pose_yaw = 0.0;
-  }
+    double imu_yaw, imu_pitch, imu_roll;
+    tf2::Matrix3x3(tmp).getRPY(imu_roll, imu_pitch, imu_yaw);
 
-  orientation_quaternion_.setRPY(imu_roll, imu_pitch, pose_yaw);
+    tf2::Transform transform;
+    transform.setIdentity();
+    tf2::Quaternion quat;
 
-  fused_imu_msg_.header.stamp = imu_msg->header.stamp;
+    quat.setRPY(imu_roll, imu_pitch, 0.0);
 
-  fused_imu_msg_.orientation.x = orientation_quaternion_.getX();
-  fused_imu_msg_.orientation.y = orientation_quaternion_.getY();
-  fused_imu_msg_.orientation.z = orientation_quaternion_.getZ();
-  fused_imu_msg_.orientation.w = orientation_quaternion_.getW();
+    // Publish transform from base_stabilized to base_frame
+    geometry_msgs::msg::TransformStamped transform_stamped;
+    transform_stamped.header.stamp = imu_msg->header.stamp;
+    transform_stamped.header.frame_id = p_base_stabilized_frame_;
+    transform_stamped.child_frame_id = p_base_frame_;
+    transform_stamped.transform.translation.x = 0.0;
+    transform_stamped.transform.translation.y = 0.0;
+    transform_stamped.transform.translation.z = 0.0;
+    transform_stamped.transform.rotation.x = quat.x();
+    transform_stamped.transform.rotation.y = quat.y();
+    transform_stamped.transform.rotation.z = quat.z();
+    transform_stamped.transform.rotation.w = quat.w();
+    tf_broadcaster_->sendTransform(transform_stamped);
 
-  fused_imu_publisher_.publish(fused_imu_msg_);
+    double pose_yaw = 0.0;
 
-  //If no pose message received, yaw is set to 0.
-  //@TODO: Check for timestamp of pose and disable sending if too old
-  if (last_pose_msg_ != 0){
-    if ( (callback_count_ % 5) == 0){
-      odom_msg_.header.stamp = imu_msg->header.stamp;
-      odom_msg_.pose.pose.orientation = fused_imu_msg_.orientation;
-      odom_msg_.pose.pose.position = last_pose_msg_->pose.position;
+    if (last_pose_msg_ != nullptr){
+      tf2::Quaternion pose_quat;
+      tf2::fromMsg(last_pose_msg_->pose.orientation, pose_quat);
+      double pose_pitch, pose_roll;
+      tf2::Matrix3x3(pose_quat).getRPY(pose_roll, pose_pitch, pose_yaw);
+    }
 
-      odometry_publisher_.publish(odom_msg_);
+    orientation_quaternion_.setRPY(imu_roll, imu_pitch, pose_yaw);
+
+    fused_imu_msg_.header.stamp = imu_msg->header.stamp;
+    fused_imu_msg_.orientation.x = orientation_quaternion_.x();
+    fused_imu_msg_.orientation.y = orientation_quaternion_.y();
+    fused_imu_msg_.orientation.z = orientation_quaternion_.z();
+    fused_imu_msg_.orientation.w = orientation_quaternion_.w();
+
+    fused_imu_publisher_->publish(fused_imu_msg_);
+
+    //If no pose message received, yaw is set to 0.
+    //@TODO: Check for timestamp of pose and disable sending if too old
+    if (last_pose_msg_ != nullptr){
+      if ( (callback_count_ % 5) == 0){
+        odom_msg_.header.stamp = imu_msg->header.stamp;
+        odom_msg_.pose.pose.orientation = fused_imu_msg_.orientation;
+        odom_msg_.pose.pose.position = last_pose_msg_->pose.position;
+
+        odometry_publisher_->publish(odom_msg_);
+      }
     }
   }
 
-}
+  void poseMsgCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose_msg)
+  {
+    tf2::Quaternion robot_pose_quaternion;
+    tf2::fromMsg(pose_msg->pose.orientation, robot_pose_quaternion);
+    
+    tf2::Vector3 robot_pose_position(
+      pose_msg->pose.position.x,
+      pose_msg->pose.position.y,
+      pose_msg->pose.position.z
+    );
 
-void poseMsgCallback(const geometry_msgs::PoseStamped::ConstPtr& pose_msg)
-{
+    tf2::Transform robot_pose_transform;
+    robot_pose_transform.setRotation(robot_pose_quaternion);
+    robot_pose_transform.setOrigin(robot_pose_position);
 
-  std::vector<tf::StampedTransform> transforms;
-  transforms.resize(2);
+    tf2::Transform height_transform;
+    height_transform.setIdentity();
+    height_transform.setOrigin(tf2::Vector3(0.0, 0.0, 0.0));
 
-  tf::quaternionMsgToTF(pose_msg->pose.orientation, robot_pose_quaternion_);
-  tf::pointMsgToTF(pose_msg->pose.position, robot_pose_position_);
+    // Publish map to base_footprint transform
+    geometry_msgs::msg::TransformStamped transform1;
+    transform1.header.stamp = pose_msg->header.stamp;
+    transform1.header.frame_id = p_map_frame_;
+    transform1.child_frame_id = p_base_footprint_frame_;
+    transform1.transform.translation.x = robot_pose_position.x();
+    transform1.transform.translation.y = robot_pose_position.y();
+    transform1.transform.translation.z = robot_pose_position.z();
+    transform1.transform.rotation.x = robot_pose_quaternion.x();
+    transform1.transform.rotation.y = robot_pose_quaternion.y();
+    transform1.transform.rotation.z = robot_pose_quaternion.z();
+    transform1.transform.rotation.w = robot_pose_quaternion.w();
+    tf_broadcaster_->sendTransform(transform1);
 
-  robot_pose_transform_.setRotation(robot_pose_quaternion_);
-  robot_pose_transform_.setOrigin(robot_pose_position_);
+    // Publish base_footprint to base_stabilized transform
+    geometry_msgs::msg::TransformStamped transform2;
+    transform2.header.stamp = pose_msg->header.stamp;
+    transform2.header.frame_id = p_base_footprint_frame_;
+    transform2.child_frame_id = p_base_stabilized_frame_;
+    transform2.transform.translation.x = 0.0;
+    transform2.transform.translation.y = 0.0;
+    transform2.transform.translation.z = 0.0;
+    transform2.transform.rotation.x = 0.0;
+    transform2.transform.rotation.y = 0.0;
+    transform2.transform.rotation.z = 0.0;
+    transform2.transform.rotation.w = 1.0;
+    tf_broadcaster_->sendTransform(transform2);
 
-  tf::Transform height_transform;
-  height_transform.setIdentity();
-  height_transform.setOrigin(tf::Vector3(0.0, 0.0, 0.0));
+    // Perform simple estimation of vehicle altitude based on orientation
+    if (last_pose_msg_ != nullptr){
+      tf2::Matrix3x3 orientation_matrix(orientation_quaternion_);
+      tf2::Vector3 plane_normal = orientation_matrix * tf2::Vector3(0.0, 0.0, 1.0);
 
-  transforms[0] = tf::StampedTransform(robot_pose_transform_, pose_msg->header.stamp, p_map_frame_, p_base_footprint_frame_);
-  transforms[1] = tf::StampedTransform(height_transform, pose_msg->header.stamp, p_base_footprint_frame_, p_base_stabilized_frame_);
+      tf2::Vector3 last_position(
+        last_pose_msg_->pose.position.x,
+        last_pose_msg_->pose.position.y,
+        last_pose_msg_->pose.position.z
+      );
 
-  tfB_->sendTransform(transforms);
+      // Calculate height difference (currently unused)
+      double height_difference =
+          (-plane_normal.x() * (robot_pose_position.x() - last_position.x())
+           -plane_normal.y() * (robot_pose_position.y() - last_position.y())
+           +plane_normal.z() * last_position.z()) / last_position.z();
+      (void)height_difference;  // Suppress unused variable warning
+    }
 
-  // Perform simple estimation of vehicle altitude based on orientation
-  if (last_pose_msg_){
-    tf::Vector3 plane_normal = tf::Matrix3x3(orientation_quaternion_) * tf::Vector3(0.0, 0.0, 1.0);
-
-    tf::Vector3 last_position;
-    tf::pointMsgToTF(last_pose_msg_->pose.position, last_position);
-
-    double height_difference =
-        (-plane_normal.getX() * (robot_pose_position_.getX() - last_position.getX())
-         -plane_normal.getY() * (robot_pose_position_.getY() - last_position.getY())
-         +plane_normal.getZ() * last_position.getZ()) / last_position.getZ();
-
+    last_pose_msg_ = pose_msg;
   }
 
+  std::string p_map_frame_;
+  std::string p_base_footprint_frame_;
+  std::string p_base_stabilized_frame_;
+  std::string p_base_frame_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
+  tf2::Quaternion orientation_quaternion_;
 
-  last_pose_msg_ = pose_msg;
+  sensor_msgs::msg::Imu fused_imu_msg_;
+  nav_msgs::msg::Odometry odom_msg_;
+  geometry_msgs::msg::PoseStamped::SharedPtr last_pose_msg_;
 
-}
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr fused_imu_publisher_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odometry_publisher_;
+
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscriber_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscriber_;
+
+  size_t callback_count_;
+};
 
 int main(int argc, char **argv) {
-  ros::init(argc, argv, ROS_PACKAGE_NAME);
+  rclcpp::init(argc, argv);
 
-  ros::NodeHandle n;
-  ros::NodeHandle pn("~");
+  auto node = std::make_shared<PoseAndOrientationToImuNode>();
 
-  pn.param("map_frame", p_map_frame_, std::string("map"));
-  pn.param("base_footprint_frame", p_base_footprint_frame_, std::string("base_footprint"));
-  pn.param("base_stabilized_frame", p_base_stabilized_frame_, std::string("base_stabilized"));
-  pn.param("base_frame", p_base_frame_, std::string("base_link"));
+  rclcpp::spin(node);
 
-  fused_imu_msg_.header.frame_id = p_base_stabilized_frame_;
-  odom_msg_.header.frame_id = "map";
-
-  tfB_ = new tf::TransformBroadcaster();
-
-  fused_imu_publisher_ = n.advertise<sensor_msgs::Imu>("/fused_imu",1,false);
-  odometry_publisher_ = n.advertise<nav_msgs::Odometry>("/state", 1, false);
-
-  ros::Subscriber imu_subscriber = n.subscribe("/imu", 10, imuMsgCallback);
-  ros::Subscriber pose_subscriber = n.subscribe("/pose", 10, poseMsgCallback);
-
-  callback_count_ = 0;
-
-  ros::spin();
-
-  delete tfB_;
+  rclcpp::shutdown();
 
   return 0;
 }

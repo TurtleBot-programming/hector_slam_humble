@@ -34,6 +34,7 @@
 
 class DrawInterface{
 public:
+  virtual ~DrawInterface() = default;
   virtual void setNamespace(const std::string& ns) = 0;
 
   virtual void drawPoint(const Eigen::Vector2f& pointWorldFrame) = 0;

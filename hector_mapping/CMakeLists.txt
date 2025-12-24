@@ -1,64 +1,50 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(hector_mapping)
 
-find_package(catkin REQUIRED COMPONENTS 
-  roscpp
-  nav_msgs
-  visualization_msgs
-  tf
-  message_filters
-  laser_geometry
-  message_generation
-  std_srvs)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(message_filters REQUIRED)
+find_package(laser_geometry REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(eigen3_cmake_module REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(hector_nav_msgs REQUIRED)
+find_package(hector_marker_drawing REQUIRED)
+find_package(hector_map_tools REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(Boost REQUIRED COMPONENTS thread)
 
-find_package(Eigen3 REQUIRED)
-
-#######################################
-## Declare ROS messages and services ##
-#######################################
-
-## Generate messages in the 'msg' folder
-add_message_files(
-  FILES
-  HectorDebugInfo.msg
-  HectorIterData.msg
+# Generate messages and services
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/HectorDebugInfo.msg"
+  "msg/HectorIterData.msg"
+  "srv/ResetMapping.srv"
+  DEPENDENCIES geometry_msgs
 )
 
-## Generate services in the 'srv' folder
-add_service_files(
-  FILES
-  ResetMapping.srv
-)
-
-generate_messages(
-  DEPENDENCIES
-  geometry_msgs
-)
-
-###################################
-## catkin specific configuration ##
-###################################
-catkin_package(
-  INCLUDE_DIRS include
-#  LIBRARIES hector_mapping
-  CATKIN_DEPENDS roscpp nav_msgs visualization_msgs tf message_filters laser_geometry message_runtime
-  DEPENDS EIGEN3
-)
-
-###########
-## Build ##
-###########
-
+# Include directories
 include_directories(include/hector_slam_lib)
 include_directories(
   ${Boost_INCLUDE_DIRS}
-  ${catkin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
 )
 
-add_executable(hector_mapping
+# Build executable
+add_executable(hector_mapping_node
   src/HectorDebugInfoProvider.h
   src/HectorDrawings.h
   src/HectorMappingRos.h
@@ -68,33 +54,66 @@ add_executable(hector_mapping
   src/PoseInfoContainer.h
 )
 
-add_dependencies(hector_mapping hector_mapping_generate_messages_cpp)
+ament_target_dependencies(hector_mapping_node
+  rclcpp
+  nav_msgs
+  visualization_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  message_filters
+  laser_geometry
+  std_srvs
+  Eigen3
+  hector_nav_msgs
+  hector_marker_drawing
+  hector_map_tools
+)
 
-target_link_libraries(hector_mapping
-  ${catkin_LIBRARIES}
+# Link against generated message interfaces
+rosidl_get_typesupport_target(cpp_typesupport_target
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(hector_mapping_node "${cpp_typesupport_target}")
+
+target_link_libraries(hector_mapping_node
   ${Boost_LIBRARIES}
 )
 
-#############
-## Install ##
-#############
-
-# all install targets should use catkin DESTINATION variables
-# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
-
-install(TARGETS hector_mapping
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+# Install
+install(TARGETS hector_mapping_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
-## Don't ask why it's hector_slam_lib, this was Stefan Kohlbrecher's first ROS package and a wrapper of a pre ROS header only library
 install(DIRECTORY include/hector_slam_lib/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  DESTINATION include
   FILES_MATCHING PATTERN "*.h"
   PATTERN ".svn" EXCLUDE
 )
 
 install(DIRECTORY launch/
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch/
+  DESTINATION share/${PROJECT_NAME}/launch
 )
+
+ament_export_include_directories(include)
+ament_export_dependencies(
+  rclcpp
+  nav_msgs
+  visualization_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  message_filters
+  laser_geometry
+  std_srvs
+  Eigen3
+  hector_nav_msgs
+  hector_marker_drawing
+  hector_map_tools
+)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()

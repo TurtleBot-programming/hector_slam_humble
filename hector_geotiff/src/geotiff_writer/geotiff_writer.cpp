@@ -27,7 +27,7 @@
 //=================================================================================================
 
 #include "hector_geotiff/geotiff_writer.h"
-#include <ros/console.h>
+#include <rclcpp/rclcpp.hpp>
 
 #include <QFile>
 #include <QImageWriter>
@@ -37,7 +37,7 @@
 #include <QTextStream>
 #include <QFontDatabase>
 
-#include <ros/package.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #if  __cplusplus < 201703L
 	#include <experimental/filesystem>
@@ -65,15 +65,14 @@ GeotiffWriter::GeotiffWriter( bool useCheckerboardCacheIn )
   strcpy( fake_argv[1], "-platform" );
   strcpy( fake_argv[2], "offscreen" ); // Set the env QT_DEBUG_PLUGINS to 1 to see available platforms
 
-  ROS_INFO("Creating application with offscreen platform.");
+  // Note: ROS logging removed as this is a library class without a node
   //Create a QApplication cause otherwise drawing text will crash
   app = new QApplication( fake_argc, fake_argv );
   delete[] fake_argv[0];
   delete[] fake_argv[1];
   delete[] fake_argv[2];
-  ROS_INFO("Created application");
 
-  std::string font_path = ros::package::getPath( "hector_geotiff" ) + "/fonts/Roboto-Regular.ttf";
+  std::string font_path = ament_index_cpp::get_package_share_directory("hector_geotiff") + "/fonts/Roboto-Regular.ttf";
   int id = QFontDatabase::addApplicationFont( QString::fromStdString( font_path ));
   font_family_ = QFontDatabase::applicationFontFamilies( id ).at( 0 );
 
@@ -112,7 +111,7 @@ void GeotiffWriter::setUseUtcTimeSuffix( bool useSuffix )
 }
 
 
-bool GeotiffWriter::setupTransforms( const nav_msgs::OccupancyGrid &map )
+bool GeotiffWriter::setupTransforms( const nav_msgs::msg::OccupancyGrid &map )
 {
   resolution = static_cast<float>(map.info.resolution);
   origin = Eigen::Vector2f( map.info.origin.position.x, map.info.origin.position.y );
@@ -128,7 +127,7 @@ bool GeotiffWriter::setupTransforms( const nav_msgs::OccupancyGrid &map )
 
   if ( !HectorMapTools::getMapExtends( map, minCoordsMap, maxCoordsMap ))
   {
-    ROS_INFO( "Cannot determine map extends!" );
+    // Cannot determine map extends
     return false;
   }
 
@@ -319,7 +318,7 @@ void GeotiffWriter::drawBackgroundCheckerboard()
   }
 }
 
-void GeotiffWriter::drawMap( const nav_msgs::OccupancyGrid &map, bool draw_explored_space_grid )
+void GeotiffWriter::drawMap( const nav_msgs::msg::OccupancyGrid &map, bool draw_explored_space_grid )
 {
   QPainter qPainter( &image );
 
@@ -546,7 +545,7 @@ void GeotiffWriter::writeGeotiffImage(bool completed)
     if(!fs::exists(complete_file_string.c_str())) {
       fs::create_directory(complete_file_string.c_str(), error);
       if (error) {
-        ROS_ERROR("Can't create autosave folder");
+        // Can't create autosave folder
         return;
       }
     }
@@ -555,7 +554,7 @@ void GeotiffWriter::writeGeotiffImage(bool completed)
     if(!fs::exists(complete_file_string.c_str())) {
       fs::create_directory(complete_file_string.c_str(), error);
       if (error) {
-        ROS_ERROR("Can't create folder in autosave");
+        // Can't create folder in autosave
         return;
       }
     }
@@ -608,12 +607,11 @@ void GeotiffWriter::writeGeotiffImage(bool completed)
 
   if ( !success )
   {
-    ROS_INFO( "Writing image with file %s failed with error %s", complete_file_string.c_str(),
-              imageWriter.errorString().toStdString().c_str());
+    // Writing image failed: imageWriter.errorString()
   }
   else
   {
-    ROS_INFO( "Successfully wrote geotiff to %s", complete_file_string.c_str());
+    // Successfully wrote geotiff
   }
 }
 

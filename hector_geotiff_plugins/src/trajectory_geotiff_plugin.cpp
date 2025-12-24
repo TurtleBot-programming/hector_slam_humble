@@ -29,10 +29,11 @@
 #include <hector_geotiff/map_writer_interface.h>
 #include <hector_geotiff/map_writer_plugin_interface.h>
 
-#include <ros/ros.h>
-#include <hector_nav_msgs/GetRobotTrajectory.h>
+#include <rclcpp/rclcpp.hpp>
+#include <hector_nav_msgs/srv/get_robot_trajectory.hpp>
 
 #include <fstream>
+#include <memory>
 
 namespace hector_geotiff_plugins
 {
@@ -49,8 +50,8 @@ public:
   virtual void draw(MapWriterInterface *interface);
 
 protected:
-  ros::NodeHandle nh_;
-  ros::ServiceClient service_client_;
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::Client<hector_nav_msgs::srv::GetRobotTrajectory>::SharedPtr service_client_;
 
   bool initialized_;
   std::string name_;
@@ -62,7 +63,8 @@ protected:
 };
 
 TrajectoryMapWriter::TrajectoryMapWriter()
-    : initialized_(false)
+    : node_(nullptr)
+    , initialized_(false)
 {}
 
 TrajectoryMapWriter::~TrajectoryMapWriter()
@@ -70,33 +72,57 @@ TrajectoryMapWriter::~TrajectoryMapWriter()
 
 void TrajectoryMapWriter::initialize(const std::string& name)
 {
-  ros::NodeHandle plugin_nh("~/" + name);
+  // Create a node for this plugin if it doesn't exist
+  if (!node_) {
+    node_ = rclcpp::Node::make_shared("trajectory_map_writer_" + name);
+  }
+
   std::string service_name_;
 
+  // Declare and get parameters
+  node_->declare_parameter<std::string>(name + ".service_name", "trajectory");
+  node_->declare_parameter<int>(name + ".path_color_r", 120);
+  node_->declare_parameter<int>(name + ".path_color_g", 0);
+  node_->declare_parameter<int>(name + ".path_color_b", 240);
 
-  plugin_nh.param("service_name", service_name_, std::string("trajectory"));
-  plugin_nh.param("path_color_r", path_color_r_, 120);
-  plugin_nh.param("path_color_g", path_color_g_, 0);
-  plugin_nh.param("path_color_b", path_color_b_, 240);
+  node_->get_parameter(name + ".service_name", service_name_);
+  node_->get_parameter(name + ".path_color_r", path_color_r_);
+  node_->get_parameter(name + ".path_color_g", path_color_g_);
+  node_->get_parameter(name + ".path_color_b", path_color_b_);
 
-  service_client_ = nh_.serviceClient<hector_nav_msgs::GetRobotTrajectory>(service_name_);
+  service_client_ = node_->create_client<hector_nav_msgs::srv::GetRobotTrajectory>(service_name_);
 
   initialized_ = true;
   this->name_ = name;
-  ROS_INFO_NAMED(name_, "Successfully initialized hector_geotiff MapWriter plugin %s.", name_.c_str());
+  RCLCPP_INFO(node_->get_logger(), "Successfully initialized hector_geotiff MapWriter plugin %s.", name_.c_str());
 }
 
 void TrajectoryMapWriter::draw(MapWriterInterface *interface)
 {
     if(!initialized_) return;
 
-    hector_nav_msgs::GetRobotTrajectory srv_path;
-    if (!service_client_.call(srv_path)) {
-      ROS_ERROR_NAMED(name_, "Cannot draw trajectory, service %s failed", service_client_.getService().c_str());
+    if (!service_client_->wait_for_service(std::chrono::seconds(1))) {
+      RCLCPP_ERROR(node_->get_logger(), "Cannot draw trajectory, service %s not available", service_client_->get_service_name());
       return;
     }
 
-    std::vector<geometry_msgs::PoseStamped>& traj_vector (srv_path.response.trajectory.poses);
+    auto request = std::make_shared<hector_nav_msgs::srv::GetRobotTrajectory::Request>();
+    auto result = service_client_->async_send_request(request);
+
+    // Wait for the result with a timeout
+    auto status = result.wait_for(std::chrono::seconds(1));
+    if (status != std::future_status::ready) {
+      RCLCPP_ERROR(node_->get_logger(), "Cannot draw trajectory, service %s timed out", service_client_->get_service_name());
+      return;
+    }
+    
+    auto response = result.get();
+    if (!response) {
+      RCLCPP_ERROR(node_->get_logger(), "Cannot draw trajectory, service %s failed", service_client_->get_service_name());
+      return;
+    }
+
+    std::vector<geometry_msgs::msg::PoseStamped>& traj_vector (response->trajectory.poses);
 
     size_t size = traj_vector.size();
 
@@ -104,13 +130,12 @@ void TrajectoryMapWriter::draw(MapWriterInterface *interface)
     pointVec.resize(size);
 
     for (size_t i = 0; i < size; ++i){
-      const geometry_msgs::PoseStamped& pose (traj_vector[i]);
+      const geometry_msgs::msg::PoseStamped& pose (traj_vector[i]);
 
       pointVec[i] = Eigen::Vector2f(pose.pose.position.x, pose.pose.position.y);
     }
 
     if (size > 0){
-      //Eigen::Vector3f startVec(pose_vector[0].x,pose_vector[0].y,pose_vector[0].z);
       Eigen::Vector3f startVec(pointVec[0].x(),pointVec[0].y(),0.0f);
       interface->drawPath(startVec, pointVec, path_color_r_, path_color_g_, path_color_b_);
     }
@@ -119,5 +144,5 @@ void TrajectoryMapWriter::draw(MapWriterInterface *interface)
 } // namespace
 
 //register this planner as a MapWriterPluginInterface plugin
-#include <pluginlib/class_list_macros.h>
+#include <pluginlib/class_list_macros.hpp>
 PLUGINLIB_EXPORT_CLASS(hector_geotiff_plugins::TrajectoryMapWriter, hector_geotiff::MapWriterPluginInterface)

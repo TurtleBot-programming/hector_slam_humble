@@ -167,7 +167,7 @@ public:
     currUpdateIndex += 3;
   }
 
-  inline void updateLineBresenhami( const Eigen::Vector2i& beginMap, const Eigen::Vector2i& endMap, unsigned int max_length = UINT_MAX){
+  inline void updateLineBresenhami( const Eigen::Vector2i& beginMap, const Eigen::Vector2i& endMap, unsigned int /* max_length */ = UINT_MAX){
 
     int x0 = beginMap[0];
     int y0 = beginMap[1];

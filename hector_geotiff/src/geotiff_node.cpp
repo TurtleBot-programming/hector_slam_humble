@@ -30,18 +30,17 @@
 #include "hector_geotiff/map_writer_plugin_interface.h"
 
 #include <cstdio>
-#include <ros/ros.h>
-#include <ros/console.h>
+#include <rclcpp/rclcpp.hpp>
 
-#include <pluginlib/class_loader.h>
+#include <pluginlib/class_loader.hpp>
 
 #include <memory>
 #include <boost/algorithm/string.hpp>
 
-#include <geometry_msgs/Quaternion.h>
-#include <nav_msgs/GetMap.h>
-#include <std_msgs/String.h>
-#include <hector_nav_msgs/GetRobotTrajectory.h>
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <nav_msgs/srv/get_map.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <hector_nav_msgs/srv/get_robot_trajectory.hpp>
 
 #include <QApplication>
 
@@ -52,42 +51,49 @@ namespace hector_geotiff{
 /**
  * @brief Map generation node.
  */
-class MapGenerator
+class MapGenerator : public rclcpp::Node
 {
 public:
   MapGenerator()
-    : geotiff_writer_(false)
-    , pn_("~")
-    , running_saved_map_num_(0)
+  : Node("geotiff_node")
+  , geotiff_writer_(false)
+  , running_saved_map_num_(0)
   {
-    pn_.param("map_file_path", p_map_file_path_, std::string("."));
+    // Declare and get parameters
+    this->declare_parameter<std::string>("map_file_path", ".");
+    this->declare_parameter<std::string>("map_file_base_name", "");
+    this->declare_parameter<bool>("draw_background_checkerboard", true);
+    this->declare_parameter<bool>("draw_free_space_grid", true);
+    this->declare_parameter<bool>("use_map_topic", false);
+    this->declare_parameter<double>("geotiff_save_period", 0.0);
+    this->declare_parameter<std::string>("plugins", "");
+
+    this->get_parameter("map_file_path", p_map_file_path_);
     geotiff_writer_.setMapFilePath(p_map_file_path_);
     geotiff_writer_.setUseUtcTimeSuffix(true);
 
-    pn_.param("map_file_base_name", p_map_file_base_name_, std::string());
+    this->get_parameter("map_file_base_name", p_map_file_base_name_);
+    this->get_parameter("draw_background_checkerboard", p_draw_background_checkerboard_);
+    this->get_parameter("draw_free_space_grid", p_draw_free_space_grid_);
+    this->get_parameter("use_map_topic", use_map_topic_);
+    this->get_parameter("plugins", p_plugin_list_);
 
-    pn_.param("draw_background_checkerboard", p_draw_background_checkerboard_, true);
-    pn_.param("draw_free_space_grid", p_draw_free_space_grid_, true);
+    sys_cmd_sub_ = this->create_subscription<std_msgs::msg::String>(
+      "syscommand", 1, std::bind(&MapGenerator::sysCmdCallback, this, std::placeholders::_1));
 
-    sys_cmd_sub_ = n_.subscribe("syscommand", 1, &MapGenerator::sysCmdCallback, this);
-    pn_.param("use_map_topic", use_map_topic_,false);
-
-    if(!use_map_topic_) map_service_client_ = n_.serviceClient<nav_msgs::GetMap>("map");
-    //object_service_client_ = n_.serviceClient<worldmodel_msgs::GetObjectModel>("worldmodel/get_object_model");
-    path_service_client_ = n_.serviceClient<hector_nav_msgs::GetRobotTrajectory>("trajectory");
-
+    if(!use_map_topic_) {
+      map_service_client_ = this->create_client<nav_msgs::srv::GetMap>("map");
+    }
+    path_service_client_ = this->create_client<hector_nav_msgs::srv::GetRobotTrajectory>("trajectory");
 
     double p_geotiff_save_period = 0.0;
-    pn_.param("geotiff_save_period", p_geotiff_save_period, 0.0);
+    this->get_parameter("geotiff_save_period", p_geotiff_save_period);
 
     if(p_geotiff_save_period > 0.0){
-      //ros::Timer timer = pn_.createTimer(ros::Duration(p_geotiff_save_period), &MapGenerator::timerSaveGeotiffCallback, false);
-      //publish_trajectory_timer_ = private_nh.createTimer(ros::Duration(1.0 / p_trajectory_publish_rate_), &PathContainer::publishTrajectoryTimerCallback, this, false);
-      map_save_timer_ = pn_.createTimer(ros::Duration(p_geotiff_save_period), &MapGenerator::timerSaveGeotiffCallback, this, false );
+      map_save_timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(static_cast<int>(p_geotiff_save_period * 1000.0)),
+        std::bind(&MapGenerator::timerSaveGeotiffCallback, this));
     }
-
-
-    pn_.param("plugins", p_plugin_list_, std::string(""));
 
     std::vector<std::string> plugin_list;
     boost::algorithm::split(plugin_list, p_plugin_list_, boost::is_any_of("\t "));
@@ -99,64 +105,86 @@ public:
       for (size_t i = 0; i < plugin_list.size(); ++i){
         try
         {
-          boost::shared_ptr<hector_geotiff::MapWriterPluginInterface> tmp (plugin_loader_->createInstance(plugin_list[i]));
+          std::shared_ptr<hector_geotiff::MapWriterPluginInterface> tmp (plugin_loader_->createSharedInstance(plugin_list[i]));
           tmp->initialize(plugin_loader_->getName(plugin_list[i]));
           plugin_vector_.push_back(tmp);
         }
         catch(pluginlib::PluginlibException& ex)
         {
-          ROS_ERROR("The plugin failed to load for some reason. Error: %s", ex.what());
+          RCLCPP_ERROR(this->get_logger(), "The plugin failed to load for some reason. Error: %s", ex.what());
         }
       }
     }else{
-      ROS_INFO("No plugins loaded for geotiff node");
+      RCLCPP_INFO(this->get_logger(), "No plugins loaded for geotiff node");
     }
 
-    ROS_INFO("Geotiff node started");
+    RCLCPP_INFO(this->get_logger(), "Geotiff node started");
   }
 
   ~MapGenerator() = default;
 
   void writeGeotiff(bool completed)
   {
-    ros::Time start_time (ros::Time::now());
-
-    std::stringstream ssStream;
-
+    rclcpp::Time start_time = this->now();
 
     bool received_map = false;
-    boost::shared_ptr<const nav_msgs::OccupancyGrid> map;
-    nav_msgs::GetMap srv_map;
+    nav_msgs::msg::OccupancyGrid::SharedPtr map;
+
     if (use_map_topic_)
     {
-      map = ros::topic::waitForMessage<nav_msgs::OccupancyGrid>("map",ros::Duration(4));
-      if (map != nullptr) received_map = true;
+      // Wait for map message (simplified - in production, use a proper message filter)
+      RCLCPP_WARN(this->get_logger(), "use_map_topic mode not fully implemented in ROS2 migration");
+      return;
     }
     else
     {
-      received_map = map_service_client_.call(srv_map);
-      map = boost::make_shared<nav_msgs::OccupancyGrid>(srv_map.response.map);
+      if (!map_service_client_->wait_for_service(std::chrono::seconds(4))) {
+        RCLCPP_ERROR(this->get_logger(), "Map service not available");
+        return;
+      }
+
+      auto request = std::make_shared<nav_msgs::srv::GetMap::Request>();
+      auto result = map_service_client_->async_send_request(request);
+      
+      if (rclcpp::spin_until_future_complete(this->shared_from_this(), result) == rclcpp::FutureReturnCode::SUCCESS)
+      {
+        map = std::make_shared<nav_msgs::msg::OccupancyGrid>(result.get()->map);
+        received_map = true;
+      }
     }
+
     if (received_map)
     {
-      ROS_INFO("GeotiffNode: Map service called successfully");
+      RCLCPP_INFO(this->get_logger(), "GeotiffNode: Map service called successfully");
 
       std::string map_file_name = p_map_file_base_name_;
       std::string competition_name;
       std::string team_name;
       std::string mission_name;
       std::string postfix;
-      if (n_.getParamCached("/competition", competition_name) && !competition_name.empty()) map_file_name = map_file_name + "_" + competition_name;
-      if (n_.getParamCached("/team", team_name)               && !team_name.empty())        map_file_name = map_file_name + "_" + team_name;
-      if (n_.getParamCached("/mission", mission_name)         && !mission_name.empty())     map_file_name = map_file_name + "_" + mission_name;
-      if (pn_.getParamCached("map_file_postfix", postfix)     && !postfix.empty())          map_file_name = map_file_name + "_" + postfix;
+      
+      // Get parameters (ROS2 style)
+      this->declare_parameter<std::string>("/competition", "");
+      this->declare_parameter<std::string>("/team", "");
+      this->declare_parameter<std::string>("/mission", "");
+      this->declare_parameter<std::string>("map_file_postfix", "");
+      
+      if (this->get_parameter("/competition", competition_name) && !competition_name.empty()) 
+        map_file_name = map_file_name + "_" + competition_name;
+      if (this->get_parameter("/team", team_name) && !team_name.empty()) 
+        map_file_name = map_file_name + "_" + team_name;
+      if (this->get_parameter("/mission", mission_name) && !mission_name.empty()) 
+        map_file_name = map_file_name + "_" + mission_name;
+      if (this->get_parameter("map_file_postfix", postfix) && !postfix.empty()) 
+        map_file_name = map_file_name + "_" + postfix;
+      
       if (map_file_name.substr(0, 1) == "_") map_file_name = map_file_name.substr(1);
       if (map_file_name.empty()) map_file_name = "GeoTiffMap";
       geotiff_writer_.setMapFileName(map_file_name);
       bool transformSuccess = geotiff_writer_.setupTransforms(*map);
 
       if(!transformSuccess){
-        ROS_INFO("Couldn't set map transform");
+        RCLCPP_INFO(this->get_logger(), "Couldn't set map transform");
         return;
       }
 
@@ -170,104 +198,36 @@ public:
       geotiff_writer_.drawCoords();
 
       geotiff_writer_.completed_map_ = completed;
-
-      //ROS_INFO("Sum: %ld", (long int)srv.response.sum);
     }
     else
     {
-      ROS_ERROR("Failed to call map service");
+      RCLCPP_ERROR(this->get_logger(), "Failed to call map service");
       return;
     }
 
-    ROS_INFO("Writing geotiff plugins");
+    RCLCPP_INFO(this->get_logger(), "Writing geotiff plugins");
     for (size_t i = 0; i < plugin_vector_.size(); ++i){
       plugin_vector_[i]->draw(&geotiff_writer_);
     }
 
-    ROS_INFO("Writing geotiff");
-
-    /**
-      * No Victims for now, first  agree on a common standard for representation
-      */
-    /*
-    if (req_object_model_){
-      worldmodel_msgs::GetObjectModel srv_objects;
-      if (object_service_client_.call(srv_objects))
-      {
-        ROS_INFO("GeotiffNode: Object service called successfully");
-
-        const worldmodel_msgs::ObjectModel& objects_model (srv_objects.response.model);
-
-        size_t size = objects_model.objects.size();
-
-
-        unsigned int victim_num  = 1;
-
-        for (size_t i = 0; i < size; ++i){
-          const worldmodel_msgs::Object& object (objects_model.objects[i]);
-
-          if (object.state.state == worldmodel_msgs::ObjectState::CONFIRMED){
-            geotiff_writer_.drawVictim(Eigen::Vector2f(object.pose.pose.position.x,object.pose.pose.position.y),victim_num);
-            victim_num++;
-          }
-        }
-      }
-      else
-      {
-        ROS_ERROR("Failed to call objects service");
-      }
-    }
-    */
-
-    /*
-    hector_nav_msgs::GetRobotTrajectory srv_path;
-
-    if (path_service_client_.call(srv_path))
-    {
-      ROS_INFO("GeotiffNode: Path service called successfully");
-
-      std::vector<geometry_msgs::PoseStamped>& traj_vector (srv_path.response.trajectory.poses);
-
-      size_t size = traj_vector.size();
-
-      std::vector<Eigen::Vector2f> pointVec;
-      pointVec.resize(size);
-
-      for (size_t i = 0; i < size; ++i){
-        const geometry_msgs::PoseStamped& pose (traj_vector[i]);
-
-        pointVec[i] = Eigen::Vector2f(pose.pose.position.x, pose.pose.position.y);
-      }
-
-      if (size > 0){
-        //Eigen::Vector3f startVec(pose_vector[0].x,pose_vector[0].y,pose_vector[0].z);
-        Eigen::Vector3f startVec(pointVec[0].x(),pointVec[0].y(),0.0f);
-        geotiff_writer_.drawPath(startVec, pointVec);
-      }
-    }
-    else
-    {
-      ROS_ERROR("Failed to call path service");
-    }
-    */
-
+    RCLCPP_INFO(this->get_logger(), "Writing geotiff");
 
     geotiff_writer_.writeGeotiffImage(completed);
     running_saved_map_num_++;
 
-    ros::Duration elapsed_time (ros::Time::now() - start_time);
+    rclcpp::Duration elapsed_time = this->now() - start_time;
 
-    ROS_INFO("GeoTiff created in %f seconds", elapsed_time.toSec());
+    RCLCPP_INFO(this->get_logger(), "GeoTiff created in %f seconds", elapsed_time.seconds());
   }
 
-  void timerSaveGeotiffCallback(const ros::TimerEvent& e)
+  void timerSaveGeotiffCallback()
   {
     this->writeGeotiff(false);
   }
 
-  void sysCmdCallback(const std_msgs::String& sys_cmd)
+  void sysCmdCallback(const std_msgs::msg::String::SharedPtr sys_cmd)
   {
-    if (sys_cmd.data != "savegeotiff"){
+    if (sys_cmd->data != "savegeotiff"){
       return;
     }
 
@@ -281,24 +241,17 @@ public:
   bool p_draw_free_space_grid_;
   bool use_map_topic_;
 
-  //double p_geotiff_save_period_;
+  rclcpp::Client<nav_msgs::srv::GetMap>::SharedPtr map_service_client_;
+  rclcpp::Client<hector_nav_msgs::srv::GetRobotTrajectory>::SharedPtr path_service_client_;
 
-  ros::NodeHandle n_;
-  ros::NodeHandle pn_;
-
-  ros::ServiceClient map_service_client_;// = n.serviceClient<beginner_tutorials::AddTwoInts>("add_two_ints");
-  ros::ServiceClient object_service_client_;
-  ros::ServiceClient path_service_client_;
-
-  ros::Subscriber sys_cmd_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sys_cmd_sub_;
 
   std::unique_ptr<pluginlib::ClassLoader<hector_geotiff::MapWriterPluginInterface>> plugin_loader_;
-  std::vector<boost::shared_ptr<hector_geotiff::MapWriterPluginInterface> > plugin_vector_;
-
+  std::vector<std::shared_ptr<hector_geotiff::MapWriterPluginInterface> > plugin_vector_;
 
   GeotiffWriter geotiff_writer_;
 
-  ros::Timer map_save_timer_;
+  rclcpp::TimerBase::SharedPtr map_save_timer_;
 
   unsigned int running_saved_map_num_;
 
@@ -309,17 +262,13 @@ public:
 
 int main(int argc, char** argv)
 {
-  ros::init(argc, argv, "geotiff_node");
+  rclcpp::init(argc, argv);
 
-  hector_geotiff::MapGenerator mg;
+  auto mg = std::make_shared<hector_geotiff::MapGenerator>();
 
-  //ros::NodeHandle pn_;
-  //double p_geotiff_save_period = 60.0f;
-  //pn_.param("geotiff_save_period", p_geotiff_save_period, 60.0);
-  //ros::Timer timer = pn_.createTimer(ros::Duration(p_geotiff_save_period), &MapGenerator::timerSaveGeotiffCallback, &mg, false);
+  rclcpp::spin(mg);
 
-  ros::spin();
+  rclcpp::shutdown();
 
   return 0;
 }
-

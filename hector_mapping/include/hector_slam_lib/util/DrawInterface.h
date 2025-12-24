@@ -31,6 +31,7 @@
 
 class DrawInterface{
 public:
+  virtual ~DrawInterface() = default;
   virtual void drawPoint(const Eigen::Vector2f& pointWorldFrame) = 0;
   virtual void drawArrow(const Eigen::Vector3f& poseWorld) = 0;
   virtual void drawCovariance(const Eigen::Vector2f& mean, const Eigen::Matrix2f& cov) = 0;

@@ -32,6 +32,7 @@
 class MapLockerInterface
 {
 public:
+  virtual ~MapLockerInterface() = default;
   virtual void lockMap() = 0;
   virtual void unlockMap() = 0;
 };

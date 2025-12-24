@@ -1,35 +1,55 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(hector_trajectory_server)
 
-find_package(catkin REQUIRED COMPONENTS roscpp hector_nav_msgs nav_msgs hector_map_tools tf)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
-catkin_package(
-  CATKIN_DEPENDS roscpp hector_nav_msgs nav_msgs hector_map_tools tf
-)
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-###########
-## Build ##
-###########
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(hector_nav_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(hector_map_tools REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
-include_directories(
-  ${catkin_INCLUDE_DIRS}
-)
-
+# Build executable
 add_executable(hector_trajectory_server src/hector_trajectory_server.cpp)
-add_dependencies(hector_trajectory_server ${catkin_EXPORTED_TARGETS})
-target_link_libraries(hector_trajectory_server
-  ${catkin_LIBRARIES}
+
+ament_target_dependencies(hector_trajectory_server
+  rclcpp
+  hector_nav_msgs
+  nav_msgs
+  hector_map_tools
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
 )
 
-#############
-## Install ##
-#############
-
-# all install targets should use catkin DESTINATION variables
-# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
-
+# Install
 install(TARGETS hector_trajectory_server
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+  DESTINATION lib/${PROJECT_NAME}
 )
+
+ament_export_dependencies(
+  rclcpp
+  hector_nav_msgs
+  nav_msgs
+  hector_map_tools
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()

@@ -27,18 +27,18 @@
 //=================================================================================================
 
 
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
 
 #include "HectorMappingRos.h"
 
 int main(int argc, char** argv)
 {
-  ros::init(argc, argv, "hector_slam");
+  rclcpp::init(argc, argv);
 
-  HectorMappingRos sm;
+  auto node = std::make_shared<HectorMappingRos>();
 
-  ros::spin();
+  rclcpp::spin(node);
 
-  return(0);
+  rclcpp::shutdown();
+  return 0;
 }
-

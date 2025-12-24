@@ -1,32 +1,45 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(hector_imu_attitude_to_tf)
 
-find_package(catkin REQUIRED COMPONENTS roscpp sensor_msgs tf)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
-catkin_package(
-  CATKIN_DEPENDS roscpp sensor_msgs tf
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+
+add_executable(hector_imu_attitude_to_tf_node src/imu_attitude_to_tf_node.cpp)
+
+ament_target_dependencies(hector_imu_attitude_to_tf_node
+  rclcpp
+  sensor_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
 )
 
-include_directories(
-  ${catkin_INCLUDE_DIRS}
+install(TARGETS hector_imu_attitude_to_tf_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
-add_executable(imu_attitude_to_tf_node src/imu_attitude_to_tf_node.cpp)
-target_link_libraries(imu_attitude_to_tf_node ${catkin_LIBRARIES})
-
-#############
-## Install ##
-#############
-
-# all install targets should use catkin DESTINATION variables
-# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
-
-install(TARGETS imu_attitude_to_tf_node
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+ament_export_dependencies(
+  rclcpp
+  sensor_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
 )
 
-install(DIRECTORY launch
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()
