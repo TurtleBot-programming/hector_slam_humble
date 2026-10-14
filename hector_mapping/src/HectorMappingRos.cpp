@@ -40,6 +40,7 @@
 #include "HectorMapMutex.h"
 
 #include <tf2/utils.h>
+#include <cmath>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <chrono>
 #include <string>
@@ -327,11 +328,23 @@ void HectorMappingRos::scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr
       return;
     }
 
-    // Convert the laser scan to point cloud
-    // TODO: Check laser_geometry ROS2 API
-    // projector_.projectLaser(*scan, laser_point_cloud_, 30.0);
-    // For now, skip point cloud conversion and use direct scan conversion
-    this->rosLaserScanToDataContainer(*scan, laserScanContainer, slamProcessor->getScaleToMap());
+    // Project the scan into a point cloud in the laser frame (what
+    // laser_geometry's projectLaser() did in the ROS 1 version)
+    laser_point_cloud_.header = scan->header;
+    laser_point_cloud_.points.clear();
+    laser_point_cloud_.points.reserve(scan->ranges.size());
+    float angle = scan->angle_min;
+    for (float range : scan->ranges)
+    {
+      if (std::isfinite(range) && range > scan->range_min && range < scan->range_max)
+      {
+        geometry_msgs::msg::Point32 p;
+        p.x = std::cos(angle) * range;
+        p.y = std::sin(angle) * range;
+        laser_point_cloud_.points.push_back(p);
+      }
+      angle += scan->angle_increment;
+    }
 
     // Publish the point cloud if there are any subscribers (disabled for now)
     // if (scan_point_cloud_publisher_->get_subscription_count() > 0)
@@ -339,8 +352,8 @@ void HectorMappingRos::scanCallback(const sensor_msgs::msg::LaserScan::SharedPtr
     //   scan_point_cloud_publisher_->publish(laser_point_cloud_);
     // }
 
-    // Convert the point cloud to our data container (using direct scan conversion for now)
-    // this->rosPointCloudToDataContainer(laser_point_cloud_, laser_transform, laserScanContainer, slamProcessor->getScaleToMap());
+    // Convert the point cloud to our data container, transforming it into the base frame
+    this->rosPointCloudToDataContainer(laser_point_cloud_, laser_transform, laserScanContainer, slamProcessor->getScaleToMap());
 
     // Now let's choose the initial pose estimate for our slam process update
     Eigen::Vector3f start_estimate(Eigen::Vector3f::Zero());
