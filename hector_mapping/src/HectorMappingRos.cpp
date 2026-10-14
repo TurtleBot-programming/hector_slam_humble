@@ -233,7 +233,11 @@ HectorMappingRos::HectorMappingRos()
   RCLCPP_INFO(this->get_logger(), "HectorSM p_laser_z_min_value_: %f", p_laser_z_min_value_);
   RCLCPP_INFO(this->get_logger(), "HectorSM p_laser_z_max_value_: %f", p_laser_z_max_value_);
 
-  scanSubscriber_ = this->create_subscription<sensor_msgs::msg::LaserScan>(p_scan_topic_, p_scan_subscriber_queue_size_, 
+  // Sensor-data (best-effort) QoS: most lidar drivers publish best-effort,
+  // which a reliable subscription does not match, so no scans would arrive.
+  // A best-effort subscription also matches reliable publishers.
+  scanSubscriber_ = this->create_subscription<sensor_msgs::msg::LaserScan>(p_scan_topic_,
+    rclcpp::SensorDataQoS().keep_last(p_scan_subscriber_queue_size_),
     std::bind(&HectorMappingRos::scanCallback, this, std::placeholders::_1));
   sysMsgSubscriber_ = this->create_subscription<std_msgs::msg::String>(p_sys_msg_topic_, 2, 
     std::bind(&HectorMappingRos::sysMsgCallback, this, std::placeholders::_1));
